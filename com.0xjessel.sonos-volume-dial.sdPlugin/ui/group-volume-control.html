@@ -51,11 +51,11 @@
         <!-- IP Addresses Input -->
         <div class="sdpi-item">
             <div class="sdpi-item-label">Speaker IPs</div>
-            <input class="sdpi-item-value" type="text" id="speakerIps" setting="speakerIps" placeholder="192.168.1.100, 192.168.1.101">
+            <input class="sdpi-item-value" type="text" id="speakerIps" setting="speakerIps" placeholder="192.168.1.100:+5, 192.168.1.101:-3">
         </div>
-        <div class="validation-message" id="ipValidationMessage">Please enter valid IP addresses separated by commas</div>
+        <div class="validation-message" id="ipValidationMessage">Please enter valid entries (e.g., 192.168.1.100:+5, 192.168.1.101:-3)</div>
         <div class="sdpi-item">
-            <div class="spdi-item-value info-tooltip">Enter multiple speaker IPs separated by commas. All speakers will be controlled simultaneously.</div>
+            <div class="spdi-item-value info-tooltip">Enter IPs separated by commas. Add optional volume offset per speaker with :offset (e.g., 192.168.1.100:+5, 192.168.1.101:-3). Offset defaults to 0.</div>
         </div>
 
         <!-- Volume Step Configuration -->
@@ -78,15 +78,18 @@
         let pluginAction = null;
         let currentSettings = {};
 
-        function validateIPAddress(ip) {
+        function validateEntry(entry) {
+            // Accept "IP" or "IP:offset"
             const ipRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-            return ipRegex.test(ip);
+            const match = entry.match(/^(.+?)(?::([+-]?\d+))?$/);
+            if (!match) return false;
+            return ipRegex.test(match[1]);
         }
 
         function validateAllIPs(value) {
             if (!value) return true;
-            const ips = value.split(',').map(ip => ip.trim()).filter(ip => ip.length > 0);
-            return ips.length > 0 && ips.every(validateIPAddress);
+            const entries = value.split(',').map(e => e.trim()).filter(e => e.length > 0);
+            return entries.length > 0 && entries.every(validateEntry);
         }
 
         function showValidationMessage(show) {

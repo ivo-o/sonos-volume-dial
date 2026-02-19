@@ -2,11 +2,17 @@ import { action, DialAction, DialRotateEvent, SingletonAction, WillAppearEvent, 
 import streamDeck from '@elgato/streamdeck';
 import { Sonos } from 'sonos';
 
+type SpeakerEntry = {
+	sonos: Sonos;
+	ip: string;
+	offset: number;
+};
+
 /**
  * Per-instance state for each group dial action, keyed by action ID.
  */
 type InstanceState = {
-	speakers: Sonos[];
+	speakers: SpeakerEntry[];
 	lastKnownVolume: number;
 	isMuted: boolean;
 	pollInterval: { active: boolean } | null;
@@ -47,16 +53,35 @@ export class SonosGroupVolumeDial extends SingletonAction {
 		return state;
 	}
 
-	private parseIps(settings: SonosGroupVolumeDialSettings): string[] {
+	private parseSpeakers(settings: SonosGroupVolumeDialSettings): { ip: string; offset: number }[] {
 		if (!settings.speakerIps) return [];
 		return settings.speakerIps
 			.split(',')
-			.map(ip => ip.trim())
-			.filter(ip => ip.length > 0);
+			.map(entry => entry.trim())
+			.filter(entry => entry.length > 0)
+			.map(entry => {
+				// Format: "IP:offset" e.g. "192.168.1.100:+5" or just "192.168.1.100"
+				const colonIdx = entry.lastIndexOf(':');
+				// Check if there's a colon after the IP (not part of the IP itself)
+				if (colonIdx > 0) {
+					const possibleIp = entry.substring(0, colonIdx);
+					const possibleOffset = entry.substring(colonIdx + 1);
+					const offsetNum = parseInt(possibleOffset, 10);
+					if (!isNaN(offsetNum) && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(possibleIp)) {
+						return { ip: possibleIp, offset: offsetNum };
+					}
+				}
+				return { ip: entry, offset: 0 };
+			});
 	}
 
-	private connectSpeakers(state: InstanceState, ips: string[]) {
-		state.speakers = ips.map(ip => new Sonos(ip));
+	private connectSpeakers(state: InstanceState, entries: { ip: string; offset: number }[]) {
+		state.speakers = entries.map(e => ({ sonos: new Sonos(e.ip), ip: e.ip, offset: e.offset }));
+	}
+
+	/** Clamp volume to 0-100 range */
+	private clampVolume(vol: number): number {
+		return Math.max(0, Math.min(100, vol));
 	}
 
 	private startPolling(dialAction: DialAction<SonosGroupVolumeDialSettings>) {
@@ -101,20 +126,21 @@ export class SonosGroupVolumeDial extends SingletonAction {
 
 			// Reconnect if no speakers
 			if (state.speakers.length === 0) {
-				const ips = this.parseIps(state.currentSettings);
-				if (ips.length === 0) {
+				const entries = this.parseSpeakers(state.currentSettings);
+				if (entries.length === 0) {
 					this.stopPolling(actionId);
 					return;
 				}
-				this.connectSpeakers(state, ips);
+				this.connectSpeakers(state, entries);
 			}
 
 			try {
-				// Poll the first speaker as the reference for volume display
-				const [volume, isMuted] = await Promise.all([
-					state.speakers[0].getVolume(),
-					state.speakers[0].getMuted()
+				// Poll the first speaker as the reference for volume display, subtract its offset to get base volume
+				const [rawVolume, isMuted] = await Promise.all([
+					state.speakers[0].sonos.getVolume(),
+					state.speakers[0].sonos.getMuted()
 				]);
+				const volume = this.clampVolume(rawVolume - state.speakers[0].offset);
 
 				if ((volume !== state.lastKnownVolume || isMuted !== state.isMuted) && !state.isRotating) {
 					state.lastKnownVolume = volume;
@@ -191,16 +217,17 @@ export class SonosGroupVolumeDial extends SingletonAction {
 				indicator: { value, opacity: state.isMuted ? 0.5 : 1.0 },
 			});
 
-			const ips = this.parseIps(ev.payload.settings);
-			if (ips.length > 0) {
-				logger.info('Connecting to Sonos speakers:', ips.join(', '));
-				this.connectSpeakers(state, ips);
+			const entries = this.parseSpeakers(ev.payload.settings);
+			if (entries.length > 0) {
+				logger.info('Connecting to Sonos speakers:', entries.map(e => `${e.ip}:${e.offset}`).join(', '));
+				this.connectSpeakers(state, entries);
 
 				try {
-					const [volume, isMuted] = await Promise.all([
-						state.speakers[0].getVolume(),
-						state.speakers[0].getMuted()
+					const [rawVolume, isMuted] = await Promise.all([
+						state.speakers[0].sonos.getVolume(),
+						state.speakers[0].sonos.getMuted()
 					]);
+					const volume = this.clampVolume(rawVolume - state.speakers[0].offset);
 
 					state.lastKnownVolume = volume;
 					state.isMuted = isMuted;
@@ -257,21 +284,23 @@ export class SonosGroupVolumeDial extends SingletonAction {
 				state.volumeChangeTimeout = null;
 			}
 
-			const ips = this.parseIps(ev.payload.settings);
-			if (ips.length > 0) {
+			const entries = this.parseSpeakers(ev.payload.settings);
+			if (entries.length > 0) {
 				state.volumeChangeTimeout = setTimeout(async () => {
 					try {
 						if (state.speakers.length === 0) {
-							this.connectSpeakers(state, ips);
+							this.connectSpeakers(state, entries);
 						}
 
 						if (state.isMuted) {
-							await Promise.all(state.speakers.map(s => s.setMuted(false)));
+							await Promise.all(state.speakers.map(s => s.sonos.setMuted(false)));
 							state.isMuted = false;
 						}
 
-						await Promise.all(state.speakers.map(s => s.setVolume(newValue)));
-						logger.debug('Volume set to', newValue, 'on all speakers');
+						await Promise.all(state.speakers.map(s =>
+							s.sonos.setVolume(this.clampVolume(newValue + s.offset))
+						));
+						logger.debug('Volume set to', newValue, '(with offsets) on all speakers');
 					} catch (error) {
 						logger.error('Failed to update volume:', {
 							error: error instanceof Error ? error.message : String(error)
@@ -310,15 +339,15 @@ export class SonosGroupVolumeDial extends SingletonAction {
 				indicator: { value: state.lastKnownVolume, opacity: newMutedState ? 0.5 : 1.0 }
 			});
 
-			const ips = this.parseIps(ev.payload.settings);
-			if (ips.length > 0) {
+			const entries = this.parseSpeakers(ev.payload.settings);
+			if (entries.length > 0) {
 				Promise.resolve().then(async () => {
 					try {
 						if (state.speakers.length === 0) {
-							this.connectSpeakers(state, ips);
+							this.connectSpeakers(state, entries);
 							if (!state.pollInterval) this.startPolling(dialAction);
 						}
-						await Promise.all(state.speakers.map(s => s.setMuted(newMutedState)));
+						await Promise.all(state.speakers.map(s => s.sonos.setMuted(newMutedState)));
 					} catch (error) {
 						logger.error('Failed to toggle mute:', {
 							error: error instanceof Error ? error.message : String(error)
@@ -352,15 +381,15 @@ export class SonosGroupVolumeDial extends SingletonAction {
 				indicator: { value: state.lastKnownVolume, opacity: newMutedState ? 0.5 : 1.0 }
 			});
 
-			const ips = this.parseIps(ev.payload.settings);
-			if (ips.length > 0) {
+			const entries = this.parseSpeakers(ev.payload.settings);
+			if (entries.length > 0) {
 				Promise.resolve().then(async () => {
 					try {
 						if (state.speakers.length === 0) {
-							this.connectSpeakers(state, ips);
+							this.connectSpeakers(state, entries);
 							if (!state.pollInterval) this.startPolling(dialAction);
 						}
-						await Promise.all(state.speakers.map(s => s.setMuted(newMutedState)));
+						await Promise.all(state.speakers.map(s => s.sonos.setMuted(newMutedState)));
 					} catch (error) {
 						logger.error('Failed to toggle mute:', {
 							error: error instanceof Error ? error.message : String(error)
@@ -396,16 +425,17 @@ export class SonosGroupVolumeDial extends SingletonAction {
 				state.speakers = [];
 				this.stopPolling(actionId);
 
-				const ips = this.parseIps(ev.payload.settings);
-				if (ips.length > 0) {
-					logger.info('Connecting to speakers:', ips.join(', '));
-					this.connectSpeakers(state, ips);
+				const entries = this.parseSpeakers(ev.payload.settings);
+				if (entries.length > 0) {
+					logger.info('Connecting to speakers:', entries.map(e => `${e.ip}:${e.offset}`).join(', '));
+					this.connectSpeakers(state, entries);
 
 					try {
-						const [volume, isMuted] = await Promise.all([
-							state.speakers[0].getVolume(),
-							state.speakers[0].getMuted()
+						const [rawVolume, isMuted] = await Promise.all([
+							state.speakers[0].sonos.getVolume(),
+							state.speakers[0].sonos.getMuted()
 						]);
+						const volume = this.clampVolume(rawVolume - state.speakers[0].offset);
 
 						state.lastKnownVolume = volume;
 						state.isMuted = isMuted;
