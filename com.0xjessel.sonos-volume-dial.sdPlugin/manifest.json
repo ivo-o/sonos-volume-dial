@@ -31,7 +31,7 @@
 		{
 			"Name": "Group Volume",
 			"UUID": "com.0xjessel.sonos-volume-dial.group-volume",
-			"Icon": "imgs/actions/speaker.wave.3",
+			"Icon": "imgs/actions/speaker.2",
 			"Tooltip": "Control multiple Sonos speakers simultaneously using the dial",
 			"PropertyInspectorPath": "ui/group-volume-control.html",
 			"Controllers": [
@@ -47,7 +47,7 @@
 			},
 			"States": [
 				{
-					"Image": "imgs/actions/speaker.wave.3"
+					"Image": "imgs/actions/speaker.2"
 				}
 			]
 		}
